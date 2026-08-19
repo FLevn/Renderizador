@@ -47,6 +47,32 @@ class GL:
             gpu.GPU.draw_pixel([x, y], gpu.GPU.RGB8, color)
 
     @staticmethod
+    def _draw_line(x0, y0, x1, y1, color):
+        """Rasteriza um segmento usando Bresenham para evitar falhas por arredondamento."""
+        x0 = int(round(x0))
+        y0 = int(round(y0))
+        x1 = int(round(x1))
+        y1 = int(round(y1))
+
+        dx = abs(x1 - x0)
+        dy = abs(y1 - y0)
+        sx = 1 if x0 < x1 else -1
+        sy = 1 if y0 < y1 else -1
+        err = dx - dy
+
+        while True:
+            GL._draw_pixel(x0, y0, color)
+            if x0 == x1 and y0 == y1:
+                break
+            twice_err = 2 * err
+            if twice_err > -dy:
+                err -= dy
+                x0 += sx
+            if twice_err < dx:
+                err += dx
+                y0 += sy
+
+    @staticmethod
     def polypoint2D(point, colors):
         """Função usada para renderizar Polypoint2D."""
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/geometry2D.html#Polypoint2D
@@ -80,13 +106,7 @@ class GL:
         for index in range(0, len(lineSegments) - 2, 2):
             start_x, start_y = lineSegments[index:index + 2]
             end_x, end_y = lineSegments[index + 2:index + 4]
-            distance = max(abs(end_x - start_x), abs(end_y - start_y))
-            steps = max(1, int(math.ceil(distance)))
-            for step in range(steps + 1):
-                progress = step / steps
-                x = start_x + (end_x - start_x) * progress
-                y = start_y + (end_y - start_y) * progress
-                GL._draw_pixel(x, y, color)
+            GL._draw_line(start_x, start_y, end_x, end_y, color)
 
     @staticmethod
     def circle2D(radius, colors):
