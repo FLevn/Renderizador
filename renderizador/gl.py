@@ -23,6 +23,10 @@ class GL:
     height = 600  # altura da tela
     near = 0.01   # plano de corte próximo
     far = 1000    # plano de corte distante
+    view = np.identity(4)
+    projection = np.identity(4)
+    model = np.identity(4)
+    model_stack = []
 
     @staticmethod
     def setup(width, height, near=0.01, far=1000):
@@ -31,6 +35,47 @@ class GL:
         GL.height = height
         GL.near = near
         GL.far = far
+        GL.model = np.identity(4)
+        GL.model_stack = []
+
+    @staticmethod
+    def _translation(vector):
+        matrix = np.identity(4)
+        matrix[:3, 3] = vector[:3]
+        return matrix
+
+    @staticmethod
+    def _rotation(rotation):
+        axis = np.array(rotation[:3], dtype=float)
+        angle = rotation[3]
+        norm = np.linalg.norm(axis)
+        if norm == 0 or angle == 0:
+            return np.identity(4)
+
+        x, y, z = axis / norm
+        cos = math.cos(angle)
+        sen = math.sin(angle)
+        return np.array([
+            [cos + x * x * (1 - cos), x * y * (1 - cos) - z * sen,
+             x * z * (1 - cos) + y * sen, 0],
+            [y * x * (1 - cos) + z * sen, cos + y * y * (1 - cos),
+             y * z * (1 - cos) - x * sen, 0],
+            [z * x * (1 - cos) - y * sen, z * y * (1 - cos) + x * sen,
+             cos + z * z * (1 - cos), 0],
+            [0, 0, 0, 1]
+        ])
+
+    @staticmethod
+    def _project(vertex):
+        coordinate = np.array([vertex[0], vertex[1], vertex[2], 1.0])
+        clip = GL.projection @ GL.view @ GL.model @ coordinate
+        if clip[3] <= 0:
+            return None
+        normalized = clip[:3] / clip[3]
+        if np.any(normalized < -1) or np.any(normalized > 1):
+            return None
+        return [(normalized[0] + 1) * GL.width / 2,
+                (1 - normalized[1]) * GL.height / 2]
 
     @staticmethod
     def _color(colors):
@@ -180,11 +225,19 @@ class GL:
         # tipos de cores.
 
         # O print abaixo é só para vocês verificarem o funcionamento, DEVE SER REMOVIDO.
-        print("TriangleSet : pontos = {0}".format(point)) # imprime no terminal pontos
-        print("TriangleSet : colors = {0}".format(colors)) # imprime no terminal as cores
+        color = GL._color(colors)
+        for index in range(0, len(point) - 8, 9):
+            vertices = [point[index:index + 3],
+                        point[index + 3:index + 6],
+                        point[index + 6:index + 9]]
+            projected = [GL._project(vertex) for vertex in vertices]
+            if any(vertex is None for vertex in projected):
+                continue
 
-        # Exemplo de desenho de um pixel branco na coordenada 10, 10
-        gpu.GPU.draw_pixel([10, 10], gpu.GPU.RGB8, [255, 255, 255])  # altera pixel
+            GL.triangleSet2D(
+                [coordinate for vertex in projected for coordinate in vertex],
+                {"emissiveColor": [channel / 255 for channel in color]}
+            )
 
     @staticmethod
     def viewpoint(position, orientation, fieldOfView):
@@ -194,10 +247,17 @@ class GL:
         # perspectiva para poder aplicar nos pontos dos objetos geométricos.
 
         # O print abaixo é só para vocês verificarem o funcionamento, DEVE SER REMOVIDO.
-        print("Viewpoint : ", end='')
-        print("position = {0} ".format(position), end='')
-        print("orientation = {0} ".format(orientation), end='')
-        print("fieldOfView = {0} ".format(fieldOfView))
+        camera_pose = GL._translation(position) @ GL._rotation(orientation)
+        GL.view = np.linalg.inv(camera_pose)
+        aspect = GL.width / GL.height
+        cotangent = 1 / math.tan(fieldOfView / 2)
+        GL.projection = np.array([
+            [cotangent / aspect, 0, 0, 0],
+            [0, cotangent, 0, 0],
+            [0, 0, (GL.far + GL.near) / (GL.near - GL.far),
+             2 * GL.far * GL.near / (GL.near - GL.far)],
+            [0, 0, -1, 0]
+        ])
 
     @staticmethod
     def transform_in(translation, scale, rotation):
@@ -214,14 +274,10 @@ class GL:
         # Você precisará usar alguma estrutura de dados pilha para organizar as matrizes.
 
         # O print abaixo é só para vocês verificarem o funcionamento, DEVE SER REMOVIDO.
-        print("Transform : ", end='')
-        if translation:
-            print("translation = {0} ".format(translation), end='') # imprime no terminal
-        if scale:
-            print("scale = {0} ".format(scale), end='') # imprime no terminal
-        if rotation:
-            print("rotation = {0} ".format(rotation), end='') # imprime no terminal
-        print("")
+        GL.model_stack.append(GL.model.copy())
+        transform = GL._translation(translation) @ GL._rotation(rotation)
+        transform[:3, :3] = transform[:3, :3] @ np.diag(scale[:3])
+        GL.model = GL.model @ transform
 
     @staticmethod
     def transform_out():
@@ -232,7 +288,8 @@ class GL:
         # pilha implementada.
 
         # O print abaixo é só para vocês verificarem o funcionamento, DEVE SER REMOVIDO.
-        print("Saindo de Transform")
+        if GL.model_stack:
+            GL.model = GL.model_stack.pop()
 
     @staticmethod
     def triangleStripSet(point, stripCount, colors):
