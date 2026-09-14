@@ -118,6 +118,64 @@ class GL:
                 y0 += sy
 
     @staticmethod
+    def _draw_triangle(vertices, colors):
+        """Rasteriza um triângulo projetado, interpolando cores quando fornecidas."""
+        area = ((vertices[1][0] - vertices[0][0]) *
+                (vertices[2][1] - vertices[0][1]) -
+                (vertices[1][1] - vertices[0][1]) *
+                (vertices[2][0] - vertices[0][0]))
+        if area == 0:
+            return
+
+        min_x = max(0, int(math.floor(min(vertex[0] for vertex in vertices))))
+        max_x = min(GL.width - 1, int(math.ceil(max(vertex[0] for vertex in vertices))))
+        min_y = max(0, int(math.floor(min(vertex[1] for vertex in vertices))))
+        max_y = min(GL.height - 1, int(math.ceil(max(vertex[1] for vertex in vertices))))
+        if min_x > max_x or min_y > max_y:
+            return
+
+        for y in range(min_y, max_y + 1):
+            for x in range(min_x, max_x + 1):
+                edge_0 = ((vertices[1][0] - vertices[0][0]) * (y - vertices[0][1]) -
+                          (vertices[1][1] - vertices[0][1]) * (x - vertices[0][0]))
+                edge_1 = ((vertices[2][0] - vertices[1][0]) * (y - vertices[1][1]) -
+                          (vertices[2][1] - vertices[1][1]) * (x - vertices[1][0]))
+                edge_2 = ((vertices[0][0] - vertices[2][0]) * (y - vertices[2][1]) -
+                          (vertices[0][1] - vertices[2][1]) * (x - vertices[2][0]))
+                inside = ((edge_0 >= 0 and edge_1 >= 0 and edge_2 >= 0) or
+                          (edge_0 <= 0 and edge_1 <= 0 and edge_2 <= 0))
+                if not inside:
+                    continue
+
+                if colors is None:
+                    color = GL._color({"emissiveColor": [1, 1, 1]})
+                else:
+                    weight_0 = (((vertices[1][0] - vertices[2][0]) * (y - vertices[2][1]) +
+                                 (vertices[2][1] - vertices[1][1]) * (x - vertices[2][0])) / area)
+                    weight_1 = (((vertices[2][0] - vertices[0][0]) * (y - vertices[2][1]) +
+                                 (vertices[0][1] - vertices[2][1]) * (x - vertices[2][0])) / area)
+                    weight_2 = 1 - weight_0 - weight_1
+                    color = [int(round(max(0, min(255,
+                        weight_0 * colors[0][channel] +
+                        weight_1 * colors[1][channel] +
+                        weight_2 * colors[2][channel])))) for channel in range(3)]
+                GL._draw_pixel(x, y, color)
+
+    @staticmethod
+    def _project_triangle(vertices):
+        projected = [GL._project(vertex) for vertex in vertices]
+        if any(vertex is None for vertex in projected):
+            return None
+        return projected
+
+    @staticmethod
+    def _triangle_from_vertices(vertices, colors):
+        projected = GL._project_triangle(vertices)
+        if projected is None:
+            return
+        GL._draw_triangle(projected, colors)
+
+    @staticmethod
     def polypoint2D(point, colors):
         """Função usada para renderizar Polypoint2D."""
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/geometry2D.html#Polypoint2D
@@ -230,14 +288,9 @@ class GL:
             vertices = [point[index:index + 3],
                         point[index + 3:index + 6],
                         point[index + 6:index + 9]]
-            projected = [GL._project(vertex) for vertex in vertices]
-            if any(vertex is None for vertex in projected):
-                continue
-
-            GL.triangleSet2D(
-                [coordinate for vertex in projected for coordinate in vertex],
-                {"emissiveColor": [channel / 255 for channel in color]}
-            )
+            projected = GL._project_triangle(vertices)
+            if projected is not None:
+                GL._draw_triangle(projected, [color, color, color])
 
     @staticmethod
     def viewpoint(position, orientation, fieldOfView):
@@ -306,15 +359,18 @@ class GL:
         # depois 2, 3 e 4, e assim por diante. Cuidado com a orientação dos vértices, ou seja,
         # todos no sentido horário ou todos no sentido anti-horário, conforme especificado.
 
-        # O print abaixo é só para vocês verificarem o funcionamento, DEVE SER REMOVIDO.
-        print("TriangleStripSet : pontos = {0} ".format(point), end='')
-        for i, strip in enumerate(stripCount):
-            print("strip[{0}] = {1} ".format(i, strip), end='')
-        print("")
-        print("TriangleStripSet : colors = {0}".format(colors)) # imprime no terminal as cores
-
-        # Exemplo de desenho de um pixel branco na coordenada 10, 10
-        gpu.GPU.draw_pixel([10, 10], gpu.GPU.RGB8, [255, 255, 255])  # altera pixel
+        color = GL._color(colors)
+        vertex_offset = 0
+        for count in stripCount:
+            vertices = [point[index:index + 3]
+                        for index in range(vertex_offset * 3,
+                                           (vertex_offset + count) * 3, 3)]
+            for index in range(len(vertices) - 2):
+                GL._triangle_from_vertices(
+                    [vertices[index], vertices[index + 1], vertices[index + 2]],
+                    [color, color, color]
+                )
+            vertex_offset += count
 
     @staticmethod
     def indexedTriangleStripSet(point, index, colors):
@@ -332,12 +388,20 @@ class GL:
         # depois 2, 3 e 4, e assim por diante. Cuidado com a orientação dos vértices, ou seja,
         # todos no sentido horário ou todos no sentido anti-horário, conforme especificado.
 
-        # O print abaixo é só para vocês verificarem o funcionamento, DEVE SER REMOVIDO.
-        print("IndexedTriangleStripSet : pontos = {0}, index = {1}".format(point, index))
-        print("IndexedTriangleStripSet : colors = {0}".format(colors)) # imprime as cores
-
-        # Exemplo de desenho de um pixel branco na coordenada 10, 10
-        gpu.GPU.draw_pixel([10, 10], gpu.GPU.RGB8, [255, 255, 255])  # altera pixel
+        color = GL._color(colors)
+        strip = []
+        for vertex_index in index + [-1]:
+            if vertex_index == -1:
+                for offset in range(len(strip) - 2):
+                    indices = strip[offset:offset + 3]
+                    if all(0 <= item * 3 + 2 < len(point) for item in indices):
+                        GL._triangle_from_vertices(
+                            [point[item * 3:item * 3 + 3] for item in indices],
+                            [color, color, color]
+                        )
+                strip = []
+            else:
+                strip.append(vertex_index)
 
     @staticmethod
     def indexedFaceSet(coord, coordIndex, colorPerVertex, color, colorIndex,
@@ -364,23 +428,45 @@ class GL:
         # cor da textura conforme a posição do mapeamento. Dentro da classe GPU já está
         # implementadado um método para a leitura de imagens.
 
-        # Os prints abaixo são só para vocês verificarem o funcionamento, DEVE SER REMOVIDO.
-        print("IndexedFaceSet : ")
-        if coord:
-            print("\tpontos(x, y, z) = {0}, coordIndex = {1}".format(coord, coordIndex))
-        print("colorPerVertex = {0}".format(colorPerVertex))
-        if colorPerVertex and color and colorIndex:
-            print("\tcores(r, g, b) = {0}, colorIndex = {1}".format(color, colorIndex))
-        if texCoord and texCoordIndex:
-            print("\tpontos(u, v) = {0}, texCoordIndex = {1}".format(texCoord, texCoordIndex))
-        if current_texture:
-            image = gpu.GPU.load_texture(current_texture[0])
-            print("\t Matriz com image = {0}".format(image))
-            print("\t Dimensões da image = {0}".format(image.shape))
-        print("IndexedFaceSet : colors = {0}".format(colors))  # imprime no terminal as cores
+        if not coord:
+            return
 
-        # Exemplo de desenho de um pixel branco na coordenada 10, 10
-        gpu.GPU.draw_pixel([10, 10], gpu.GPU.RGB8, [255, 255, 255])  # altera pixel
+        def groups(values):
+            result = []
+            current = []
+            for value in values + [-1]:
+                if value == -1:
+                    if current:
+                        result.append(current)
+                    current = []
+                else:
+                    current.append(value)
+            return result
+
+        faces = groups(coordIndex)
+        color_faces = groups(colorIndex) if colorIndex else []
+        appearance_color = GL._color(colors)
+
+        for face_number, face in enumerate(faces):
+            if len(face) < 3:
+                continue
+            face_colors = None
+            if colorPerVertex and color:
+                indices = color_faces[face_number] if face_number < len(color_faces) else face
+                if len(indices) >= len(face):
+                    face_colors = [GL._color({"emissiveColor": color[indices[i] * 3:indices[i] * 3 + 3]})
+                                   if 0 <= indices[i] * 3 + 2 < len(color) else appearance_color
+                                   for i in range(len(face))]
+
+            for offset in range(1, len(face) - 1):
+                triangle_indices = [face[0], face[offset], face[offset + 1]]
+                if not all(0 <= item * 3 + 2 < len(coord) for item in triangle_indices):
+                    continue
+                vertices = [coord[item * 3:item * 3 + 3] for item in triangle_indices]
+                triangle_colors = [appearance_color] * 3
+                if face_colors:
+                    triangle_colors = [face_colors[0], face_colors[offset], face_colors[offset + 1]]
+                GL._triangle_from_vertices(vertices, triangle_colors)
 
     @staticmethod
     def box(size, colors):
