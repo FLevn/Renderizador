@@ -35,16 +35,23 @@ class Renderizador:
         self.image_file = "tela.png"
         self.scene = None
         self.framebuffers = {}
+        self.supersampling = 2
+        self.render_width = self.width * self.supersampling
+        self.render_height = self.height * self.supersampling
 
     def setup(self):
         """Configura o sistema para a renderização."""
         # Configurando color buffers para exibição na tela
 
-        # Cria uma (1) posição de FrameBuffer na GPU
-        fbo = gpu.GPU.gen_framebuffers(1)
+        self.render_width = self.width * self.supersampling
+        self.render_height = self.height * self.supersampling
+        gl.GL.setup(self.render_width, self.render_height, near=0.01, far=1000)
+
+        fbo = gpu.GPU.gen_framebuffers(2)
 
         # Define o atributo FRONT como o FrameBuffe principal
         self.framebuffers["FRONT"] = fbo[0]
+        self.framebuffers["OUTPUT"] = fbo[1]
 
         # Define que a posição criada será usada para desenho e leitura
         gpu.GPU.bind_framebuffer(gpu.GPU.FRAMEBUFFER, self.framebuffers["FRONT"])
@@ -55,24 +62,21 @@ class Renderizador:
 
         # Aloca memória no FrameBuffer para um tipo e tamanho especificado de buffer
 
-        # Memória de Framebuffer para canal de cores
         gpu.GPU.framebuffer_storage(
             self.framebuffers["FRONT"],
+            gpu.GPU.DEPTH_ATTACHMENT,
+            gpu.GPU.DEPTH_COMPONENT32F,
+            self.render_width,
+            self.render_height
+        )
+        gpu.GPU.framebuffer_storage(
+            self.framebuffers["OUTPUT"],
             gpu.GPU.COLOR_ATTACHMENT,
             gpu.GPU.RGB8,
             self.width,
             self.height
         )
 
-        # Descomente as seguintes linhas se for usar um Framebuffer para profundidade
-        # gpu.GPU.framebuffer_storage(
-        #     self.framebuffers["FRONT"],
-        #     gpu.GPU.DEPTH_ATTACHMENT,
-        #     gpu.GPU.DEPTH_COMPONENT32F,
-        #     self.width,
-        #     self.height
-        # )
-    
         # Opções:
         # - COLOR_ATTACHMENT: alocações para as cores da imagem renderizada
         # - DEPTH_ATTACHMENT: alocações para as profundidades da imagem renderizada
@@ -92,13 +96,21 @@ class Renderizador:
         gpu.GPU.clear_depth(1.0)
 
         # Definindo tamanho do Viewport para renderização
-        self.scene.viewport(width=self.width, height=self.height)
+        gpu.GPU.framebuffer_storage(
+            self.framebuffers["FRONT"],
+            gpu.GPU.COLOR_ATTACHMENT,
+            gpu.GPU.RGB8,
+            self.render_width,
+            self.render_height
+        )
+        gpu.GPU.bind_framebuffer(gpu.GPU.FRAMEBUFFER, self.framebuffers["FRONT"])
+        self.scene.viewport(width=self.render_width, height=self.render_height)
 
     def pre(self):
         """Rotinas pré renderização."""
         # Função invocada antes do processo de renderização iniciar.
 
-        # Limpa o frame buffers atual
+        gpu.GPU.bind_framebuffer(gpu.GPU.FRAMEBUFFER, self.framebuffers["FRONT"])
         gpu.GPU.clear_buffer()
 
         # Recursos que podem ser úteis:
@@ -113,9 +125,12 @@ class Renderizador:
         # ao final da renderização de um frame. Como por exemplo, executar
         # downscaling da imagem.
 
-        # Método para a troca dos buffers (NÃO IMPLEMENTADO)
-        # Esse método será utilizado na fase de implementação de animações
-        gpu.GPU.swap_buffers()
+        gpu.GPU.bind_framebuffer(gpu.GPU.READ_FRAMEBUFFER, self.framebuffers["FRONT"])
+        source = gpu.GPU.get_frame_buffer()
+        factor = self.supersampling
+        reduced = source.reshape(self.height, factor, self.width, factor, 3).mean(axis=(1, 3))
+        gpu.GPU.frame_buffer[self.framebuffers["OUTPUT"]].color[:] = reduced.astype("uint8")
+        gpu.GPU.bind_framebuffer(gpu.GPU.READ_FRAMEBUFFER, self.framebuffers["OUTPUT"])
 
     def mapping(self):
         """Mapeamento de funções para as rotinas de renderização."""
@@ -206,6 +221,7 @@ class Renderizador:
 
         # Se no modo silencioso salvar imagem e não mostrar janela de visualização
         if args.quiet:
+            self.render()
             gpu.GPU.save_image()  # Salva imagem em arquivo
         else:
             window.set_saver(gpu.GPU.save_image)  # pasa a função para salvar imagens

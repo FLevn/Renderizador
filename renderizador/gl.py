@@ -15,6 +15,7 @@ import time         # Para operações com tempo
 import gpu          # Simula os recursos de uma GPU
 import math         # Funções matemáticas
 import numpy as np  # Biblioteca do Numpy
+from PIL import Image
 
 class GL:
     """Classe que representa a biblioteca gráfica (Graphics Library)."""
@@ -27,6 +28,7 @@ class GL:
     projection = np.identity(4)
     model = np.identity(4)
     model_stack = []
+    texture_cache = {}
 
     @staticmethod
     def setup(width, height, near=0.01, far=1000):
@@ -75,12 +77,15 @@ class GL:
         if np.any(normalized < -1) or np.any(normalized > 1):
             return None
         return [(normalized[0] + 1) * GL.width / 2,
-                (1 - normalized[1]) * GL.height / 2]
+            (1 - normalized[1]) * GL.height / 2,
+            normalized[2], 1.0 / clip[3]]
 
     @staticmethod
     def _color(colors):
         """Converte a cor emissiva X3D para os canais RGB do framebuffer."""
         emissive = colors.get("emissiveColor", [0.0, 0.0, 0.0])
+        if not any(emissive):
+            emissive = colors.get("diffuseColor", emissive)
         return [max(0, min(255, int(round(channel * 255)))) for channel in emissive]
 
     @staticmethod
@@ -118,8 +123,8 @@ class GL:
                 y0 += sy
 
     @staticmethod
-    def _draw_triangle(vertices, colors):
-        """Rasteriza um triângulo projetado, interpolando cores quando fornecidas."""
+    def _draw_triangle(vertices, colors, texcoords=None, texture=None):
+        """Rasteriza um triângulo projetado com profundidade e atributos corrigidos."""
         area = ((vertices[1][0] - vertices[0][0]) *
                 (vertices[2][1] - vertices[0][1]) -
                 (vertices[1][1] - vertices[0][1]) *
@@ -134,6 +139,18 @@ class GL:
         if min_x > max_x or min_y > max_y:
             return
 
+        mip_level = 0
+        if texture is not None and texcoords is not None:
+            texture_height, texture_width = texture[0].shape[:2]
+            screen_lengths = [max(1.0, math.hypot(vertices[(i + 1) % 3][0] - vertices[i][0],
+                                                   vertices[(i + 1) % 3][1] - vertices[i][1]))
+                              for i in range(3)]
+            texture_lengths = [math.hypot((texcoords[(i + 1) % 3][0] - texcoords[i][0]) * texture_width,
+                                          (texcoords[(i + 1) % 3][1] - texcoords[i][1]) * texture_height)
+                               for i in range(3)]
+            texels_per_pixel = max(texture_lengths[i] / screen_lengths[i] for i in range(3))
+            mip_level = max(0, int(math.floor(math.log2(max(1.0, texels_per_pixel)))))
+
         for y in range(min_y, max_y + 1):
             for x in range(min_x, max_x + 1):
                 edge_0 = ((vertices[1][0] - vertices[0][0]) * (y - vertices[0][1]) -
@@ -147,19 +164,76 @@ class GL:
                 if not inside:
                     continue
 
+                weight_0 = (((vertices[1][0] - x) * (vertices[2][1] - y) -
+                             (vertices[1][1] - y) * (vertices[2][0] - x)) / area)
+                weight_1 = (((vertices[2][0] - x) * (vertices[0][1] - y) -
+                             (vertices[2][1] - y) * (vertices[0][0] - x)) / area)
+                weight_2 = 1 - weight_0 - weight_1
+                depth = (weight_0 * vertices[0][2] + weight_1 * vertices[1][2] +
+                         weight_2 * vertices[2][2])
+                try:
+                    current_depth = gpu.GPU.read_pixel([x, y], gpu.GPU.DEPTH_COMPONENT32F)[0]
+                except (AttributeError, IndexError, TypeError):
+                    current_depth = 1.0
+                if current_depth < depth:
+                    continue
+
                 if colors is None:
                     color = GL._color({"emissiveColor": [1, 1, 1]})
                 else:
-                    weight_0 = (((vertices[1][0] - vertices[2][0]) * (y - vertices[2][1]) +
-                                 (vertices[2][1] - vertices[1][1]) * (x - vertices[2][0])) / area)
-                    weight_1 = (((vertices[2][0] - vertices[0][0]) * (y - vertices[2][1]) +
-                                 (vertices[0][1] - vertices[2][1]) * (x - vertices[2][0])) / area)
-                    weight_2 = 1 - weight_0 - weight_1
+                    reciprocal_w = (weight_0 * vertices[0][3] + weight_1 * vertices[1][3] +
+                                    weight_2 * vertices[2][3])
+                    color_weights = [weight_0 * vertices[0][3] / reciprocal_w,
+                                     weight_1 * vertices[1][3] / reciprocal_w,
+                                     weight_2 * vertices[2][3] / reciprocal_w]
                     color = [int(round(max(0, min(255,
-                        weight_0 * colors[0][channel] +
-                        weight_1 * colors[1][channel] +
-                        weight_2 * colors[2][channel])))) for channel in range(3)]
+                        color_weights[0] * colors[0][channel] +
+                        color_weights[1] * colors[1][channel] +
+                        color_weights[2] * colors[2][channel])))) for channel in range(3)]
+                if texture is not None and texcoords is not None:
+                    reciprocal_w = (weight_0 * vertices[0][3] + weight_1 * vertices[1][3] +
+                                    weight_2 * vertices[2][3])
+                    texture_weights = [weight_0 * vertices[0][3] / reciprocal_w,
+                                       weight_1 * vertices[1][3] / reciprocal_w,
+                                       weight_2 * vertices[2][3] / reciprocal_w]
+                    u = sum(texture_weights[i] * texcoords[i][0] for i in range(3))
+                    v = sum(texture_weights[i] * texcoords[i][1] for i in range(3))
+                    sample = GL._sample_texture(texture, u, v, mip_level)
+                    color = [int(round(color[channel] * sample[channel] / 255))
+                             for channel in range(3)]
+                gpu.GPU.draw_pixel([x, y], gpu.GPU.DEPTH_COMPONENT32F, [float(depth)])
                 GL._draw_pixel(x, y, color)
+
+    @staticmethod
+    def _sample_texture(texture, u, v, level_index=0):
+        """Amostra a textura com repetição e filtragem bilinear em um mipmap."""
+        level = texture[min(level_index, len(texture) - 1)]
+        height, width = level.shape[:2]
+        u = u % 1.0
+        v = v % 1.0
+        x = u * (width - 1)
+        y = (1.0 - v) * (height - 1)
+        x0, y0 = int(math.floor(x)), int(math.floor(y))
+        x1, y1 = min(x0 + 1, width - 1), min(y0 + 1, height - 1)
+        dx, dy = x - x0, y - y0
+        value = ((1 - dx) * (1 - dy) * level[y0, x0] + dx * (1 - dy) * level[y0, x1] +
+                 (1 - dx) * dy * level[y1, x0] + dx * dy * level[y1, x1])
+        return value[:3]
+
+    @staticmethod
+    def _load_texture(current_texture):
+        if not current_texture:
+            return None
+        filename = str(current_texture[0]).strip().strip('"\'')
+        if filename not in GL.texture_cache:
+            image_texture = gpu.GPU.load_texture(filename)
+            levels = [image_texture]
+            while min(levels[-1].shape[:2]) > 1:
+                image = Image.fromarray(levels[-1])
+                size = (max(1, image.width // 2), max(1, image.height // 2))
+                levels.append(np.asarray(image.resize(size, Image.Resampling.BOX)))
+            GL.texture_cache[filename] = levels
+        return GL.texture_cache[filename]
 
     @staticmethod
     def _project_triangle(vertices):
@@ -169,11 +243,11 @@ class GL:
         return projected
 
     @staticmethod
-    def _triangle_from_vertices(vertices, colors):
+    def _triangle_from_vertices(vertices, colors, texcoords=None, texture=None):
         projected = GL._project_triangle(vertices)
         if projected is None:
             return
-        GL._draw_triangle(projected, colors)
+        GL._draw_triangle(projected, colors, texcoords, texture)
 
     @staticmethod
     def polypoint2D(point, colors):
@@ -445,7 +519,9 @@ class GL:
 
         faces = groups(coordIndex)
         color_faces = groups(colorIndex) if colorIndex else []
+        texcoord_faces = groups(texCoordIndex) if texCoordIndex else []
         appearance_color = GL._color(colors)
+        texture = GL._load_texture(current_texture)
 
         for face_number, face in enumerate(faces):
             if len(face) < 3:
@@ -466,7 +542,16 @@ class GL:
                 triangle_colors = [appearance_color] * 3
                 if face_colors:
                     triangle_colors = [face_colors[0], face_colors[offset], face_colors[offset + 1]]
-                GL._triangle_from_vertices(vertices, triangle_colors)
+                triangle_texcoords = None
+                if texture and texCoord:
+                    tex_indices = (texcoord_faces[face_number]
+                                   if face_number < len(texcoord_faces) else face)
+                    tex_triangle_indices = [tex_indices[0], tex_indices[offset], tex_indices[offset + 1]]
+                    if all(0 <= item * 2 + 1 < len(texCoord) for item in tex_triangle_indices):
+                        triangle_texcoords = [texCoord[item * 2:item * 2 + 2]
+                                              for item in tex_triangle_indices]
+                GL._triangle_from_vertices(vertices, triangle_colors,
+                                            triangle_texcoords, texture)
 
     @staticmethod
     def box(size, colors):
