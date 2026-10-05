@@ -29,6 +29,9 @@ class GL:
     model = np.identity(4)
     model_stack = []
     texture_cache = {}
+    lights = []
+    headlight = True
+    animation_start = {}
 
     @staticmethod
     def setup(width, height, near=0.01, far=1000):
@@ -39,6 +42,9 @@ class GL:
         GL.far = far
         GL.model = np.identity(4)
         GL.model_stack = []
+        GL.lights = []
+        GL.headlight = True
+        GL.animation_start = {}
 
     @staticmethod
     def _translation(vector):
@@ -89,6 +95,87 @@ class GL:
         return [max(0, min(255, int(round(channel * 255)))) for channel in emissive]
 
     @staticmethod
+    def _diffuse_color(colors):
+        return [max(0, min(255, int(round(channel * 255))))
+                for channel in colors.get("diffuseColor", [0.8, 0.8, 0.8])]
+
+    @staticmethod
+    def _lit_colors(vertices, colors, triangle_colors):
+        """Calcula iluminação Phong flat e aplica-a às cores dos vértices."""
+        world = [GL.model @ np.array(vertex + [1.0]) for vertex in vertices]
+        normal = np.cross(world[1][:3] - world[0][:3], world[2][:3] - world[0][:3])
+        normal_length = np.linalg.norm(normal)
+        if normal_length == 0:
+            return triangle_colors
+        normal = normal / normal_length
+        camera = np.linalg.inv(GL.view)[:3, 3]
+        center = sum((vertex[:3] for vertex in world), np.zeros(3)) / 3
+        view_direction = camera - center
+        view_length = np.linalg.norm(view_direction)
+        if view_length:
+            view_direction /= view_length
+
+        lights = list(GL.lights)
+        if GL.headlight:
+            lights.append(([0.0, 0.0, -1.0], [1.0, 1.0, 1.0], 1.0, 0.0))
+        ambient = 0.0
+        diffuse = np.zeros(3)
+        specular = np.zeros(3)
+        for direction, light_color, intensity, ambient_intensity in lights:
+            light_direction = -np.array(direction, dtype=float)
+            light_length = np.linalg.norm(light_direction)
+            if light_length == 0:
+                continue
+            light_direction /= light_length
+            light_rgb = np.array(light_color, dtype=float) * intensity
+            ambient += ambient_intensity * intensity
+            diffuse += light_rgb * max(0.0, float(np.dot(normal, light_direction)))
+            reflected = 2 * np.dot(normal, light_direction) * normal - light_direction
+            specular += light_rgb * max(0.0, float(np.dot(reflected, view_direction))) ** \
+                max(1.0, colors.get("shininess", 0.2) * 128)
+
+        material_diffuse = np.array(colors.get("diffuseColor", [0.8, 0.8, 0.8]))
+        material_specular = np.array(colors.get("specularColor", [0.0, 0.0, 0.0]))
+        material_emissive = np.array(colors.get("emissiveColor", [0.0, 0.0, 0.0]))
+        factor = colors.get("ambientIntensity", 0.2) * ambient
+        lighting = material_emissive + material_diffuse * (factor + diffuse)
+        lighting += material_specular * specular
+        lighting = np.clip(lighting, 0.0, 1.0)
+        return [[int(round(lighting[channel] * base[channel]))
+             for channel in range(3)] for base in triangle_colors]
+
+    @staticmethod
+    def _shade_fragment(position, normal, colors):
+        camera = np.linalg.inv(GL.view)[:3, 3]
+        view_direction = camera - position
+        view_length = np.linalg.norm(view_direction)
+        if view_length:
+            view_direction /= view_length
+        ambient = 0.0
+        diffuse = np.zeros(3)
+        specular = np.zeros(3)
+        lights = list(GL.lights)
+        if GL.headlight:
+            lights.append(([0.0, 0.0, -1.0], [1.0, 1.0, 1.0], 1.0, 0.0))
+        for direction, light_color, intensity, ambient_intensity in lights:
+            light_direction = -np.array(direction, dtype=float)
+            light_length = np.linalg.norm(light_direction)
+            if light_length == 0:
+                continue
+            light_direction /= light_length
+            light_rgb = np.array(light_color, dtype=float) * intensity
+            ambient += ambient_intensity * intensity
+            diffuse += light_rgb * max(0.0, float(np.dot(normal, light_direction)))
+            reflected = 2 * np.dot(normal, light_direction) * normal - light_direction
+            specular += light_rgb * max(0.0, float(np.dot(reflected, view_direction))) ** \
+                max(1.0, colors.get("shininess", 0.2) * 128)
+        lighting = np.array(colors.get("emissiveColor", [0.0, 0.0, 0.0]))
+        lighting += np.array(colors.get("diffuseColor", [0.8, 0.8, 0.8])) * \
+            (colors.get("ambientIntensity", 0.2) * ambient + diffuse)
+        lighting += np.array(colors.get("specularColor", [0.0, 0.0, 0.0])) * specular
+        return np.clip(lighting * 255, 0, 255).astype(int).tolist()
+
+    @staticmethod
     def _draw_pixel(x, y, color):
         """Desenha um pixel se ele estiver dentro do viewport."""
         x = int(round(x))
@@ -123,7 +210,8 @@ class GL:
                 y0 += sy
 
     @staticmethod
-    def _draw_triangle(vertices, colors, texcoords=None, texture=None, opacity=1.0):
+    def _draw_triangle(vertices, colors, texcoords=None, texture=None, opacity=1.0,
+                       material=None, world_vertices=None):
         """Rasteriza um triângulo projetado com profundidade e atributos corrigidos."""
         area = ((vertices[1][0] - vertices[0][0]) *
                 (vertices[2][1] - vertices[0][1]) -
@@ -169,6 +257,11 @@ class GL:
                 weight_1 = (((vertices[2][0] - x) * (vertices[0][1] - y) -
                              (vertices[2][1] - y) * (vertices[0][0] - x)) / area)
                 weight_2 = 1 - weight_0 - weight_1
+                reciprocal_w = (weight_0 * vertices[0][3] + weight_1 * vertices[1][3] +
+                                weight_2 * vertices[2][3])
+                attribute_weights = [weight_0 * vertices[0][3] / reciprocal_w,
+                                     weight_1 * vertices[1][3] / reciprocal_w,
+                                     weight_2 * vertices[2][3] / reciprocal_w]
                 depth = (weight_0 * vertices[0][2] + weight_1 * vertices[1][2] +
                          weight_2 * vertices[2][2])
                 try:
@@ -178,25 +271,24 @@ class GL:
                 if current_depth < depth:
                     continue
 
-                if colors is None:
+                if material is not None and world_vertices is not None:
+                    position = sum((attribute_weights[i] * world_vertices[i]
+                                    for i in range(3)), np.zeros(3))
+                    normal = np.cross(world_vertices[1] - world_vertices[0],
+                                      world_vertices[2] - world_vertices[0])
+                    normal_length = np.linalg.norm(normal)
+                    color = GL._shade_fragment(position, normal / normal_length, material) \
+                        if normal_length else [0, 0, 0]
+                elif colors is None:
                     color = GL._color({"emissiveColor": [1, 1, 1]})
                 else:
-                    reciprocal_w = (weight_0 * vertices[0][3] + weight_1 * vertices[1][3] +
-                                    weight_2 * vertices[2][3])
-                    color_weights = [weight_0 * vertices[0][3] / reciprocal_w,
-                                     weight_1 * vertices[1][3] / reciprocal_w,
-                                     weight_2 * vertices[2][3] / reciprocal_w]
                     color = [int(round(max(0, min(255,
-                        color_weights[0] * colors[0][channel] +
-                        color_weights[1] * colors[1][channel] +
-                        color_weights[2] * colors[2][channel])))) for channel in range(3)]
+                        attribute_weights[0] * colors[0][channel] +
+                        attribute_weights[1] * colors[1][channel] +
+                        attribute_weights[2] * colors[2][channel])))) for channel in range(3)]
                 fragment_opacity = opacity
                 if texture is not None and texcoords is not None:
-                    reciprocal_w = (weight_0 * vertices[0][3] + weight_1 * vertices[1][3] +
-                                    weight_2 * vertices[2][3])
-                    texture_weights = [weight_0 * vertices[0][3] / reciprocal_w,
-                                       weight_1 * vertices[1][3] / reciprocal_w,
-                                       weight_2 * vertices[2][3] / reciprocal_w]
+                    texture_weights = attribute_weights
                     u = sum(texture_weights[i] * texcoords[i][0] for i in range(3))
                     v = sum(texture_weights[i] * texcoords[i][1] for i in range(3))
                     sample = GL._sample_texture(texture, u, v, mip_level)
@@ -255,11 +347,17 @@ class GL:
         return projected
 
     @staticmethod
-    def _triangle_from_vertices(vertices, colors, texcoords=None, texture=None, opacity=1.0):
+    def _triangle_from_vertices(vertices, colors, texcoords=None, texture=None, opacity=1.0,
+                                material=None):
         projected = GL._project_triangle(vertices)
         if projected is None:
             return
-        GL._draw_triangle(projected, colors, texcoords, texture, opacity)
+        world_vertices = None
+        if material is not None:
+            world_vertices = [((GL.model @ np.array(vertex + [1.0]))[:3])
+                              for vertex in vertices]
+        GL._draw_triangle(projected, colors, texcoords, texture, opacity,
+                          material, world_vertices)
 
     @staticmethod
     def polypoint2D(point, colors):
@@ -273,7 +371,7 @@ class GL:
         # O parâmetro colors é um dicionário com os tipos cores possíveis, para o Polypoint2D
         # você pode assumir inicialmente o desenho dos pontos com a cor emissiva (emissiveColor).
 
-        color = GL._color(colors)
+        color = GL._diffuse_color(colors)
         for index in range(0, len(point), 2):
             GL._draw_pixel(point[index], point[index + 1], color)
         
@@ -375,9 +473,8 @@ class GL:
             vertices = [point[index:index + 3],
                         point[index + 3:index + 6],
                         point[index + 6:index + 9]]
-            projected = GL._project_triangle(vertices)
-            if projected is not None:
-                GL._draw_triangle(projected, [color, color, color], opacity=opacity)
+            GL._triangle_from_vertices(vertices, [color, color, color], opacity=opacity,
+                                        material=colors)
 
     @staticmethod
     def viewpoint(position, orientation, fieldOfView):
@@ -455,7 +552,7 @@ class GL:
             for index in range(len(vertices) - 2):
                 GL._triangle_from_vertices(
                     [vertices[index], vertices[index + 1], vertices[index + 2]],
-                    [color, color, color]
+                    [color, color, color], material=colors
                 )
             vertex_offset += count
 
@@ -475,7 +572,7 @@ class GL:
         # depois 2, 3 e 4, e assim por diante. Cuidado com a orientação dos vértices, ou seja,
         # todos no sentido horário ou todos no sentido anti-horário, conforme especificado.
 
-        color = GL._color(colors)
+        color = GL._diffuse_color(colors)
         strip = []
         for vertex_index in index + [-1]:
             if vertex_index == -1:
@@ -484,7 +581,7 @@ class GL:
                     if all(0 <= item * 3 + 2 < len(point) for item in indices):
                         GL._triangle_from_vertices(
                             [point[item * 3:item * 3 + 3] for item in indices],
-                            [color, color, color]
+                            [color, color, color], material=colors
                         )
                 strip = []
             else:
@@ -533,7 +630,7 @@ class GL:
         faces = groups(coordIndex)
         color_faces = groups(colorIndex) if colorIndex else []
         texcoord_faces = groups(texCoordIndex) if texCoordIndex else []
-        appearance_color = GL._color(colors)
+        appearance_color = GL._diffuse_color(colors)
         appearance_opacity = 1.0 - max(0.0, min(1.0, colors.get("transparency", 0.0)))
         texture = GL._load_texture(current_texture)
 
@@ -565,7 +662,8 @@ class GL:
                         triangle_texcoords = [texCoord[item * 2:item * 2 + 2]
                                               for item in tex_triangle_indices]
                 GL._triangle_from_vertices(vertices, triangle_colors,
-                                            triangle_texcoords, texture, appearance_opacity)
+                                            triangle_texcoords, texture, appearance_opacity,
+                                            colors)
 
     @staticmethod
     def box(size, colors):
@@ -579,11 +677,16 @@ class GL:
         # encontre os vértices e defina os triângulos.
 
         # O print abaixo é só para vocês verificarem o funcionamento, DEVE SER REMOVIDO.
-        print("Box : size = {0}".format(size)) # imprime no terminal pontos
-        print("Box : colors = {0}".format(colors)) # imprime no terminal as cores
-
-        # Exemplo de desenho de um pixel branco na coordenada 10, 10
-        gpu.GPU.draw_pixel([10, 10], gpu.GPU.RGB8, [255, 255, 255])  # altera pixel
+        x, y, z = [value / 2 for value in size]
+        vertices = [[-x, -y, -z], [x, -y, -z], [x, y, -z], [-x, y, -z],
+                    [-x, -y, z], [x, -y, z], [x, y, z], [-x, y, z]]
+        faces = [(0, 2, 1), (0, 3, 2), (4, 5, 6), (4, 6, 7),
+             (1, 2, 6), (1, 6, 5), (0, 4, 7), (0, 7, 3),
+             (3, 7, 6), (3, 6, 2), (0, 1, 5), (0, 5, 4)]
+        color = GL._diffuse_color(colors)
+        for face in faces:
+            GL._triangle_from_vertices([vertices[index] for index in face], [color] * 3,
+                                        material=colors)
 
     @staticmethod
     def sphere(radius, colors):
@@ -596,8 +699,23 @@ class GL:
         # os triângulos.
 
         # O print abaixo é só para vocês verificarem o funcionamento, DEVE SER REMOVIDO.
-        print("Sphere : radius = {0}".format(radius)) # imprime no terminal o raio da esfera
-        print("Sphere : colors = {0}".format(colors)) # imprime no terminal as cores
+        color = GL._diffuse_color(colors)
+        slices, stacks = 24, 12
+        for stack in range(stacks):
+            lower = math.pi * stack / stacks
+            upper = math.pi * (stack + 1) / stacks
+            for sector in range(slices):
+                first_angle = 2 * math.pi * sector / slices
+                second_angle = 2 * math.pi * (sector + 1) / slices
+                def ring(angle, height):
+                    return [radius * math.sin(height) * math.cos(angle),
+                            radius * math.cos(height),
+                            radius * math.sin(height) * math.sin(angle)]
+                vertices = [ring(first_angle, lower), ring(second_angle, lower),
+                            ring(second_angle, upper), ring(first_angle, upper)]
+                GL._triangle_from_vertices(vertices[:3], [color] * 3, material=colors)
+                GL._triangle_from_vertices([vertices[0], vertices[2], vertices[3]],
+                                            [color] * 3, material=colors)
 
     @staticmethod
     def cone(bottomRadius, height, colors):
@@ -611,9 +729,19 @@ class GL:
         # encontre os vértices e defina os triângulos.
 
         # O print abaixo é só para vocês verificarem o funcionamento, DEVE SER REMOVIDO.
-        print("Cone : bottomRadius = {0}".format(bottomRadius)) # imprime no terminal o raio da base do cone
-        print("Cone : height = {0}".format(height)) # imprime no terminal a altura do cone
-        print("Cone : colors = {0}".format(colors)) # imprime no terminal as cores
+        color = GL._diffuse_color(colors)
+        segments = 32
+        apex = [0, height / 2, 0]
+        for segment in range(segments):
+            first_angle = 2 * math.pi * segment / segments
+            second_angle = 2 * math.pi * (segment + 1) / segments
+            first = [bottomRadius * math.cos(first_angle), -height / 2,
+                     bottomRadius * math.sin(first_angle)]
+            second = [bottomRadius * math.cos(second_angle), -height / 2,
+                      bottomRadius * math.sin(second_angle)]
+            GL._triangle_from_vertices([apex, first, second], [color] * 3, material=colors)
+            GL._triangle_from_vertices([[0, -height / 2, 0], second, first],
+                                        [color] * 3, material=colors)
 
     @staticmethod
     def cylinder(radius, height, colors):
@@ -627,9 +755,25 @@ class GL:
         # encontre os vértices e defina os triângulos.
 
         # O print abaixo é só para vocês verificarem o funcionamento, DEVE SER REMOVIDO.
-        print("Cylinder : radius = {0}".format(radius)) # imprime no terminal o raio do cilindro
-        print("Cylinder : height = {0}".format(height)) # imprime no terminal a altura do cilindro
-        print("Cylinder : colors = {0}".format(colors)) # imprime no terminal as cores
+        color = GL._diffuse_color(colors)
+        segments = 32
+        for segment in range(segments):
+            first_angle = 2 * math.pi * segment / segments
+            second_angle = 2 * math.pi * (segment + 1) / segments
+            bottom_first = [radius * math.cos(first_angle), -height / 2,
+                            radius * math.sin(first_angle)]
+            bottom_second = [radius * math.cos(second_angle), -height / 2,
+                             radius * math.sin(second_angle)]
+            top_first = [bottom_first[0], height / 2, bottom_first[2]]
+            top_second = [bottom_second[0], height / 2, bottom_second[2]]
+            GL._triangle_from_vertices([bottom_first, bottom_second, top_second],
+                                        [color] * 3, material=colors)
+            GL._triangle_from_vertices([bottom_first, top_second, top_first],
+                                        [color] * 3, material=colors)
+            GL._triangle_from_vertices([[0, -height / 2, 0], bottom_second, bottom_first],
+                                        [color] * 3, material=colors)
+            GL._triangle_from_vertices([[0, height / 2, 0], top_first, top_second],
+                                        [color] * 3, material=colors)
 
     @staticmethod
     def navigationInfo(headlight):
@@ -642,7 +786,7 @@ class GL:
         # ambientIntensity = 0,0 e direção = (0 0 −1).
 
         # O print abaixo é só para vocês verificarem o funcionamento, DEVE SER REMOVIDO.
-        print("NavigationInfo : headlight = {0}".format(headlight)) # imprime no terminal
+        GL.headlight = headlight
 
     @staticmethod
     def directionalLight(ambientIntensity, color, intensity, direction):
@@ -655,10 +799,7 @@ class GL:
         # longo de raios paralelos de uma distância infinita.
 
         # O print abaixo é só para vocês verificarem o funcionamento, DEVE SER REMOVIDO.
-        print("DirectionalLight : ambientIntensity = {0}".format(ambientIntensity))
-        print("DirectionalLight : color = {0}".format(color)) # imprime no terminal
-        print("DirectionalLight : intensity = {0}".format(intensity)) # imprime no terminal
-        print("DirectionalLight : direction = {0}".format(direction)) # imprime no terminal
+        GL.lights.append((direction, color, intensity, ambientIntensity))
 
     @staticmethod
     def pointLight(ambientIntensity, color, intensity, location):
@@ -707,14 +848,14 @@ class GL:
         # Deve retornar a fração de tempo passada em fraction_changed
 
         # O print abaixo é só para vocês verificarem o funcionamento, DEVE SER REMOVIDO.
-        print("TimeSensor : cycleInterval = {0}".format(cycleInterval)) # imprime no terminal
-        print("TimeSensor : loop = {0}".format(loop))
-
-        # Esse método já está implementado para os alunos como exemplo
-        epoch = time.time()  # time in seconds since the epoch as a floating point number.
-        fraction_changed = (epoch % cycleInterval) / cycleInterval
-
-        return fraction_changed
+        if cycleInterval <= 0:
+            return 0.0
+        sensor_key = (cycleInterval, loop)
+        started = GL.animation_start.setdefault(sensor_key, time.time())
+        elapsed = max(0.0, time.time() - started)
+        if loop:
+            return (elapsed % cycleInterval) / cycleInterval
+        return min(1.0, elapsed / cycleInterval)
 
     @staticmethod
     def splinePositionInterpolator(set_fraction, key, keyValue, closed):
@@ -728,16 +869,22 @@ class GL:
         # como fechada, com uma transições da última chave para a primeira chave. Se os keyValues
         # na primeira e na última chave não forem idênticos, o campo closed será ignorado.
 
-        # O print abaixo é só para vocês verificarem o funcionamento, DEVE SER REMOVIDO.
-        print("SplinePositionInterpolator : set_fraction = {0}".format(set_fraction))
-        print("SplinePositionInterpolator : key = {0}".format(key)) # imprime no terminal
-        print("SplinePositionInterpolator : keyValue = {0}".format(keyValue))
-        print("SplinePositionInterpolator : closed = {0}".format(closed))
-
-        # Abaixo está só um exemplo de como os dados podem ser calculados e transferidos
-        value_changed = [0.0, 0.0, 0.0]
-        
-        return value_changed
+        if len(key) < 2 or len(keyValue) < 3 * len(key):
+            return keyValue[:3] if keyValue else [0.0, 0.0, 0.0]
+        fraction = max(key[0], min(key[-1], set_fraction))
+        index = max(0, min(len(key) - 2, next((i for i in range(len(key) - 1)
+                                              if fraction <= key[i + 1]), len(key) - 2)))
+        span = key[index + 1] - key[index]
+        local = 0.0 if span == 0 else (fraction - key[index]) / span
+        points = [np.array(keyValue[i * 3:i * 3 + 3], dtype=float)
+                  for i in range(len(key))]
+        previous = points[(index - 1) % len(points)] if closed else points[max(0, index - 1)]
+        following = points[index + 1]
+        next_point = points[(index + 2) % len(points)] if closed else points[min(len(points) - 1, index + 2)]
+        result = 0.5 * ((2 * points[index]) + (following - previous) * local +
+                        (2 * previous - 5 * points[index] + 4 * following - next_point) * local ** 2 +
+                        (-previous + 3 * points[index] - 3 * following + next_point) * local ** 3)
+        return result.tolist()
 
     @staticmethod
     def orientationInterpolator(set_fraction, key, keyValue):
@@ -754,15 +901,43 @@ class GL:
         # zeroa a um. O campo keyValue deve conter exatamente tantas rotações 3D quanto os
         # quadros-chave no key.
 
-        # O print abaixo é só para vocês verificarem o funcionamento, DEVE SER REMOVIDO.
-        print("OrientationInterpolator : set_fraction = {0}".format(set_fraction))
-        print("OrientationInterpolator : key = {0}".format(key)) # imprime no terminal
-        print("OrientationInterpolator : keyValue = {0}".format(keyValue))
+        if len(key) < 2 or len(keyValue) < 4 * len(key):
+            return keyValue[:4] if keyValue else [0, 0, 1, 0]
+        fraction = max(key[0], min(key[-1], set_fraction))
+        index = max(0, min(len(key) - 2, next((i for i in range(len(key) - 1)
+                                              if fraction <= key[i + 1]), len(key) - 2)))
+        span = key[index + 1] - key[index]
+        amount = 0.0 if span == 0 else (fraction - key[index]) / span
+        first = np.array(keyValue[index * 4:index * 4 + 4], dtype=float)
+        second = np.array(keyValue[(index + 1) * 4:(index + 1) * 4 + 4], dtype=float)
+        first_axis = first[:3] / max(np.linalg.norm(first[:3]), 1e-12)
+        second_axis = second[:3] / max(np.linalg.norm(second[:3]), 1e-12)
+        quaternion = GL._axis_angle_quaternion(first_axis, first[3])
+        other = GL._axis_angle_quaternion(second_axis, second[3])
+        dot = float(np.dot(quaternion, other))
+        if dot < 0:
+            other = -other
+            dot = -dot
+        if dot > 0.9995:
+            result = quaternion + amount * (other - quaternion)
+        else:
+            angle = math.acos(max(-1.0, min(1.0, dot)))
+            result = (math.sin((1 - amount) * angle) * quaternion +
+                      math.sin(amount * angle) * other) / math.sin(angle)
+        result /= max(np.linalg.norm(result), 1e-12)
+        return GL._quaternion_axis_angle(result)
 
-        # Abaixo está só um exemplo de como os dados podem ser calculados e transferidos
-        value_changed = [0, 0, 1, 0]
+    @staticmethod
+    def _axis_angle_quaternion(axis, angle):
+        return np.array([math.cos(angle / 2), *(axis * math.sin(angle / 2))])
 
-        return value_changed
+    @staticmethod
+    def _quaternion_axis_angle(quaternion):
+        angle = 2 * math.acos(max(-1.0, min(1.0, quaternion[0])))
+        scale = math.sin(angle / 2)
+        if abs(scale) < 1e-8:
+            return [0, 0, 1, 0]
+        return np.append(quaternion[1:] / scale, angle).tolist()
 
     # Para o futuro (Não para versão atual do projeto.)
     def vertex_shader(self, shader):
