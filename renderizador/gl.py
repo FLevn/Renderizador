@@ -36,7 +36,12 @@ class GL:
 
     @staticmethod
     def setup(width, height, near=0.01, far=1000):
-        """Definr parametros para câmera de razão de aspecto, plano próximo e distante."""
+        """Inicializa o viewport e reinicia o estado global do renderizador.
+
+        Os parâmetros definem o tamanho da tela e os planos de recorte usados
+        pela projeção. Matrizes, pilha de transformações, luzes e animações
+        antigas são descartadas para começar uma nova renderização.
+        """
         GL.width = width
         GL.height = height
         GL.near = near
@@ -49,12 +54,18 @@ class GL:
 
     @staticmethod
     def _translation(vector):
+        """Cria uma matriz homogênea que translada pelos três primeiros valores."""
         matrix = np.identity(4)
         matrix[:3, 3] = vector[:3]
         return matrix
 
     @staticmethod
     def _rotation(rotation):
+        """Cria uma matriz de rotação eixo-ângulo em radianos.
+
+        O eixo é normalizado antes que a fórmula de Rodrigues seja aplicada;
+        eixo nulo ou ângulo zero produzem a matriz identidade.
+        """
         axis = np.array(rotation[:3], dtype=float)
         angle = rotation[3]
         norm = np.linalg.norm(axis)
@@ -76,6 +87,12 @@ class GL:
 
     @staticmethod
     def _project(vertex):
+        """Transforma um vértice para pixels e rejeita pontos fora do volume visível.
+
+        A função aplica as matrizes modelo, visão e projeção, divide por `w` e
+        converte as coordenadas normalizadas para o viewport, preservando a
+        profundidade e o recíproco de `w` para a interpolação em perspectiva.
+        """
         coordinate = np.array([vertex[0], vertex[1], vertex[2], 1.0])
         clip = GL.projection @ GL.view @ GL.model @ coordinate
         if clip[3] <= 0:
@@ -97,6 +114,7 @@ class GL:
 
     @staticmethod
     def _diffuse_color(colors):
+        """Converte `diffuseColor` de [0, 1] para canais RGB inteiros [0, 255]."""
         return [max(0, min(255, int(round(channel * 255))))
                 for channel in colors.get("diffuseColor", [0.8, 0.8, 0.8])]
 
@@ -147,6 +165,12 @@ class GL:
 
     @staticmethod
     def _shade_fragment(position, normal, colors):
+        """Calcula a cor iluminada de um fragmento usando o modelo Phong.
+
+        A normal e a direção da câmera são combinadas com cada luz para obter
+        os termos ambiente, difuso e especular, que são multiplicados pelos
+        parâmetros do material e limitados ao intervalo RGB.
+        """
         camera = np.linalg.inv(GL.view)[:3, 3]
         view_direction = camera - position
         view_length = np.linalg.norm(view_direction)
@@ -213,7 +237,12 @@ class GL:
     @staticmethod
     def _draw_triangle(vertices, colors, texcoords=None, texture=None, opacity=1.0,
                        material=None, world_vertices=None):
-        """Rasteriza um triângulo projetado com profundidade e atributos corrigidos."""
+        """Rasteriza um triângulo projetado por coordenadas baricêntricas.
+
+        Percorre a caixa delimitadora, testa a cobertura, interpola atributos
+        corrigidos por perspectiva e aplica teste de profundidade, textura,
+        iluminação por fragmento e composição alfa quando necessário.
+        """
         area = ((vertices[1][0] - vertices[0][0]) *
                 (vertices[2][1] - vertices[0][1]) -
                 (vertices[1][1] - vertices[0][1]) *
@@ -327,6 +356,11 @@ class GL:
 
     @staticmethod
     def _load_texture(current_texture):
+        """Carrega uma textura, reutiliza o cache e gera seus níveis mipmap.
+
+        O nome do arquivo vem do campo X3D; a imagem é carregada pela GPU e
+        reduzida pela metade repetidamente usando uma filtragem de caixa.
+        """
         if not current_texture:
             return None
         filename = str(current_texture[0]).strip().strip('"\'')
@@ -342,6 +376,7 @@ class GL:
 
     @staticmethod
     def _project_triangle(vertices):
+        """Projeta os três vértices e retorna `None` se algum for descartado."""
         projected = [GL._project(vertex) for vertex in vertices]
         if any(vertex is None for vertex in projected):
             return None
@@ -350,6 +385,11 @@ class GL:
     @staticmethod
     def _triangle_from_vertices(vertices, colors, texcoords=None, texture=None, opacity=1.0,
                                 material=None):
+        """Prepara um triângulo no espaço do mundo e delega sua rasterização.
+
+        Primeiro transforma os vértices para a tela; quando há material,
+        também conserva suas posições mundiais para calcular a iluminação.
+        """
         projected = GL._project_triangle(vertices)
         if projected is None:
             return
@@ -362,7 +402,7 @@ class GL:
 
     @staticmethod
     def polypoint2D(point, colors):
-        """Função usada para renderizar Polypoint2D."""
+        """Desenha pontos 2D lendo pares de coordenadas e convertendo a cor."""
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/geometry2D.html#Polypoint2D
         # Nessa função você receberá pontos no parâmetro point, esses pontos são uma lista
         # de pontos x, y sempre na ordem. Assim point[0] é o valor da coordenada x do
@@ -378,7 +418,7 @@ class GL:
         
     @staticmethod
     def polyline2D(lineSegments, colors):
-        """Função usada para renderizar Polyline2D."""
+        """Desenha uma polilinha 2D ligando pares consecutivos com Bresenham."""
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/geometry2D.html#Polyline2D
         # Nessa função você receberá os pontos de uma linha no parâmetro lineSegments, esses
         # pontos são uma lista de pontos x, y sempre na ordem. Assim point[0] é o valor da
@@ -398,7 +438,11 @@ class GL:
 
     @staticmethod
     def circle2D(radius, colors):
-        """Função usada para renderizar Circle2D."""
+        """Desenha o contorno de um círculo centrado no viewport.
+
+        O raio é escalado e rasterizado pelo algoritmo incremental de ponto
+        médio, refletindo cada ponto nos oito octantes.
+        """
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/geometry2D.html#Circle2D
         # Nessa função você receberá um valor de raio e deverá desenhar o contorno de
         # um círculo.
@@ -433,7 +477,7 @@ class GL:
 
     @staticmethod
     def triangleSet2D(vertices, colors):
-        """Função usada para renderizar TriangleSet2D."""
+        """Preenche triângulos 2D independentes usando testes de arestas."""
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/geometry2D.html#TriangleSet2D
         # Nessa função você receberá os vertices de um triângulo no parâmetro vertices,
         # esses pontos são uma lista de pontos x, y sempre na ordem. Assim point[0] é o
@@ -468,7 +512,11 @@ class GL:
 
     @staticmethod
     def triangleSet(point, colors):
-        """Função usada para renderizar TriangleSet."""
+        """Renderiza triângulos 3D independentes a partir de grupos de três vértices.
+
+        Cada grupo é projetado e rasterizado com profundidade, transparência e
+        os parâmetros de iluminação do material.
+        """
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/rendering.html#TriangleSet
         # Nessa função você receberá pontos no parâmetro point, esses pontos são uma lista
         # de pontos x, y, e z sempre na ordem. Assim point[0] é o valor da coordenada x do
@@ -495,7 +543,7 @@ class GL:
 
     @staticmethod
     def viewpoint(position, orientation, fieldOfView):
-        """Função usada para renderizar (na verdade coletar os dados) de Viewpoint."""
+        """Configura a câmera invertendo sua pose e construindo uma projeção perspectiva."""
         # Na função de viewpoint você receberá a posição, orientação e campo de visão da
         # câmera virtual. Use esses dados para poder calcular e criar a matriz de projeção
         # perspectiva para poder aplicar nos pontos dos objetos geométricos.
@@ -515,7 +563,7 @@ class GL:
 
     @staticmethod
     def transform_in(translation, scale, rotation):
-        """Função usada para renderizar (na verdade coletar os dados) de Transform."""
+        """Empilha o modelo atual e concatena translação, rotação e escala."""
         # A função transform_in será chamada quando se entrar em um nó X3D do tipo Transform
         # do grafo de cena. Os valores passados são a escala em um vetor [x, y, z]
         # indicando a escala em cada direção, a translação [x, y, z] nas respectivas
@@ -535,7 +583,7 @@ class GL:
 
     @staticmethod
     def transform_out():
-        """Função usada para renderizar (na verdade coletar os dados) de Transform."""
+        """Restaura da pilha a matriz de modelo anterior ao Transform atual."""
         # A função transform_out será chamada quando se sair em um nó X3D do tipo Transform do
         # grafo de cena. Não são passados valores, porém quando se sai de um nó transform se
         # deverá recuperar a matriz de transformação dos modelos do mundo da estrutura de
@@ -547,7 +595,7 @@ class GL:
 
     @staticmethod
     def triangleStripSet(point, stripCount, colors):
-        """Função usada para renderizar TriangleStripSet."""
+        """Triangula cada faixa com janelas de três vértices consecutivos."""
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/rendering.html#TriangleStripSet
         # A função triangleStripSet é usada para desenhar tiras de triângulos interconectados,
         # você receberá as coordenadas dos pontos no parâmetro point, esses pontos são uma
@@ -575,7 +623,7 @@ class GL:
 
     @staticmethod
     def indexedTriangleStripSet(point, index, colors):
-        """Função usada para renderizar IndexedTriangleStripSet."""
+        """Renderiza faixas usando índices, separando cada faixa pelo marcador -1."""
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/rendering.html#IndexedTriangleStripSet
         # A função indexedTriangleStripSet é usada para desenhar tiras de triângulos
         # interconectados, você receberá as coordenadas dos pontos no parâmetro point, esses
@@ -607,7 +655,12 @@ class GL:
     @staticmethod
     def indexedFaceSet(coord, coordIndex, colorPerVertex, color, colorIndex,
                        texCoord, texCoordIndex, colors, current_texture):
-        """Função usada para renderizar IndexedFaceSet."""
+        """Renderiza faces indexadas triangulando polígonos por um leque.
+
+        Índices opcionais fornecem cores por vértice e coordenadas de textura;
+        cada triângulo segue para a rasterização com profundidade, iluminação,
+        mipmap e transparência.
+        """
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/geometry3D.html#IndexedFaceSet
         # A função indexedFaceSet é usada para desenhar malhas de triângulos. Ela funciona de
         # forma muito simular a IndexedTriangleStripSet porém com mais recursos.
@@ -684,7 +737,7 @@ class GL:
 
     @staticmethod
     def box(size, colors):
-        """Função usada para renderizar Boxes."""
+        """Renderiza uma caixa centrada tesselaçando suas seis faces em triângulos."""
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/geometry3D.html#Box
         # A função box é usada para desenhar paralelepípedos na cena. O Box é centrada no
         # (0, 0, 0) no sistema de coordenadas local e alinhado com os eixos de coordenadas
@@ -707,7 +760,7 @@ class GL:
 
     @staticmethod
     def sphere(radius, colors):
-        """Função usada para renderizar Esferas."""
+        """Renderiza uma esfera por tesselação em 24 setores e 12 anéis."""
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/geometry3D.html#Sphere
         # A função sphere é usada para desenhar esferas na cena. O esfera é centrada no
         # (0, 0, 0) no sistema de coordenadas local. O argumento radius especifica o
@@ -736,7 +789,7 @@ class GL:
 
     @staticmethod
     def cone(bottomRadius, height, colors):
-        """Função usada para renderizar Cones."""
+        """Renderiza um cone com 32 setores, incluindo lateral e tampa inferior."""
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/geometry3D.html#Cone
         # A função cone é usada para desenhar cones na cena. O cone é centrado no
         # (0, 0, 0) no sistema de coordenadas local. O argumento bottomRadius especifica o
@@ -762,7 +815,7 @@ class GL:
 
     @staticmethod
     def cylinder(radius, height, colors):
-        """Função usada para renderizar Cilindros."""
+        """Renderiza um cilindro com 32 setores, laterais e duas tampas trianguladas."""
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/geometry3D.html#Cylinder
         # A função cylinder é usada para desenhar cilindros na cena. O cilindro é centrado no
         # (0, 0, 0) no sistema de coordenadas local. O argumento radius especifica o
@@ -794,7 +847,7 @@ class GL:
 
     @staticmethod
     def navigationInfo(headlight):
-        """Características físicas do avatar do visualizador e do modelo de visualização."""
+        """Ativa ou desativa a luz direcional que acompanha a câmera."""
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/navigation.html#NavigationInfo
         # O campo do headlight especifica se um navegador deve acender um luz direcional que
         # sempre aponta na direção que o usuário está olhando. Definir este campo como TRUE
@@ -807,7 +860,7 @@ class GL:
 
     @staticmethod
     def directionalLight(ambientIntensity, color, intensity, direction):
-        """Luz direcional ou paralela."""
+        """Registra uma luz direcional com cor, intensidade e termo ambiente."""
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/lighting.html#DirectionalLight
         # Define uma fonte de luz direcional que ilumina ao longo de raios paralelos
         # em um determinado vetor tridimensional. Possui os campos básicos ambientIntensity,
@@ -820,7 +873,7 @@ class GL:
 
     @staticmethod
     def pointLight(ambientIntensity, color, intensity, location):
-        """Luz pontual."""
+        """Recebe os dados de uma luz pontual; a implementação atual apenas os registra."""
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/lighting.html#PointLight
         # Fonte de luz pontual em um local 3D no sistema de coordenadas local. Uma fonte
         # de luz pontual emite luz igualmente em todas as direções; ou seja, é omnidirecional.
@@ -836,7 +889,7 @@ class GL:
 
     @staticmethod
     def fog(visibilityRange, color):
-        """Névoa."""
+        """Recebe os parâmetros de névoa; a implementação atual apenas os registra."""
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/environmentalEffects.html#Fog
         # O nó Fog fornece uma maneira de simular efeitos atmosféricos combinando objetos
         # com a cor especificada pelo campo de cores com base nas distâncias dos
@@ -852,7 +905,11 @@ class GL:
 
     @staticmethod
     def timeSensor(cycleInterval, loop):
-        """Gera eventos conforme o tempo passa."""
+        """Retorna a fração do ciclo decorrido desde a primeira chamada.
+
+        Cada par de duração e repetição possui um relógio próprio; ciclos em
+        loop usam o resto da divisão e ciclos finitos ficam limitados a 1.
+        """
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/time.html#TimeSensor
         # Os nós TimeSensor podem ser usados para muitas finalidades, incluindo:
         # Condução de simulações e animações contínuas; Controlar atividades periódicas;
@@ -876,7 +933,7 @@ class GL:
 
     @staticmethod
     def splinePositionInterpolator(set_fraction, key, keyValue, closed):
-        """Interpola não linearmente entre uma lista de vetores 3D."""
+        """Interpola posições 3D com uma curva Catmull-Rom entre chaves vizinhas."""
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/interpolators.html#SplinePositionInterpolator
         # Interpola não linearmente entre uma lista de vetores 3D. O campo keyValue possui
         # uma lista com os valores a serem interpolados, key possui uma lista respectiva de chaves
@@ -905,7 +962,7 @@ class GL:
 
     @staticmethod
     def orientationInterpolator(set_fraction, key, keyValue):
-        """Interpola entre uma lista de valores de rotação especificos."""
+        """Interpola orientações pelo caminho mais curto usando quaternions e SLERP."""
         # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/interpolators.html#OrientationInterpolator
         # Interpola rotações são absolutas no espaço do objeto e, portanto, não são cumulativas.
         # Uma orientação representa a posição final de um objeto após a aplicação de uma rotação.
@@ -946,10 +1003,12 @@ class GL:
 
     @staticmethod
     def _axis_angle_quaternion(axis, angle):
+        """Converte um eixo e um ângulo em um quaternion [w, x, y, z]."""
         return np.array([math.cos(angle / 2), *(axis * math.sin(angle / 2))])
 
     @staticmethod
     def _quaternion_axis_angle(quaternion):
+        """Converte um quaternion normalizado de volta para eixo e ângulo."""
         angle = 2 * math.acos(max(-1.0, min(1.0, quaternion[0])))
         scale = math.sin(angle / 2)
         if abs(scale) < 1e-8:
@@ -958,7 +1017,7 @@ class GL:
 
     # Para o futuro (Não para versão atual do projeto.)
     def vertex_shader(self, shader):
-        """Para no futuro implementar um vertex shader."""
+        """Ponto de extensão reservado para futura execução de vertex shaders."""
 
     def fragment_shader(self, shader):
-        """Para no futuro implementar um fragment shader."""
+        """Ponto de extensão reservado para futura execução de fragment shaders."""
