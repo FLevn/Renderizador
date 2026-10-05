@@ -46,6 +46,7 @@ class Renderizador:
         self.render_width = self.width * self.supersampling
         self.render_height = self.height * self.supersampling
         gl.GL.setup(self.render_width, self.render_height, near=0.01, far=1000)
+        gl.GL.pixel_scale = self.supersampling
 
         fbo = gpu.GPU.gen_framebuffers(2)
 

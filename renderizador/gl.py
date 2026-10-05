@@ -32,6 +32,7 @@ class GL:
     lights = []
     headlight = True
     animation_start = {}
+    pixel_scale = 1
 
     @staticmethod
     def setup(width, height, near=0.01, far=1000):
@@ -404,14 +405,30 @@ class GL:
         # O parâmetro colors é um dicionário com os tipos cores possíveis, para o Circle2D
         # você pode assumir o desenho das linhas com a cor emissiva (emissiveColor).
 
-        print("Circle2D : radius = {0}".format(radius)) # imprime no terminal
-        print("Circle2D : colors = {0}".format(colors)) # imprime no terminal as cores
-        
-        # Exemplo:
-        pos_x = GL.width//2
-        pos_y = GL.height//2
-        gpu.GPU.draw_pixel([pos_x, pos_y], gpu.GPU.RGB8, [255, 0, 255])  # altera pixel (u, v, tipo, r, g, b)
-        # cuidado com as cores, o X3D especifica de (0,1) e o Framebuffer de (0,255)
+        radius = int(round(abs(radius) * GL.pixel_scale))
+        if radius == 0:
+            GL._draw_pixel(GL.width / 2, GL.height / 2, GL._color(colors))
+            return
+
+        center_x = int(round(GL.width / 2))
+        center_y = int(round(GL.height / 2))
+        color = GL._color(colors)
+        x, y = radius, 0
+        decision = 1 - radius
+
+        while x >= y:
+            points = ((center_x + x, center_y + y), (center_x + y, center_y + x),
+                      (center_x - y, center_y + x), (center_x - x, center_y + y),
+                      (center_x - x, center_y - y), (center_x - y, center_y - x),
+                      (center_x + y, center_y - x), (center_x + x, center_y - y))
+            for point in points:
+                GL._draw_pixel(point[0], point[1], color)
+            y += 1
+            if decision <= 0:
+                decision += 2 * y + 1
+            else:
+                x -= 1
+                decision += 2 * (y - x) + 1
 
 
     @staticmethod
