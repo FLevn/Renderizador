@@ -6,9 +6,9 @@
 """
 Biblioteca Gráfica / Graphics Library.
 
-Desenvolvido por: <SEU NOME AQUI>
+Desenvolvido por: Felipe Leventhal
 Disciplina: Computação Gráfica
-Data: <DATA DE INÍCIO DA IMPLEMENTAÇÃO>
+Data: 19/08/2026
 """
 
 import time         # Para operações com tempo
@@ -123,7 +123,7 @@ class GL:
                 y0 += sy
 
     @staticmethod
-    def _draw_triangle(vertices, colors, texcoords=None, texture=None):
+    def _draw_triangle(vertices, colors, texcoords=None, texture=None, opacity=1.0):
         """Rasteriza um triângulo projetado com profundidade e atributos corrigidos."""
         area = ((vertices[1][0] - vertices[0][0]) *
                 (vertices[2][1] - vertices[0][1]) -
@@ -190,6 +190,7 @@ class GL:
                         color_weights[0] * colors[0][channel] +
                         color_weights[1] * colors[1][channel] +
                         color_weights[2] * colors[2][channel])))) for channel in range(3)]
+                fragment_opacity = opacity
                 if texture is not None and texcoords is not None:
                     reciprocal_w = (weight_0 * vertices[0][3] + weight_1 * vertices[1][3] +
                                     weight_2 * vertices[2][3])
@@ -201,7 +202,18 @@ class GL:
                     sample = GL._sample_texture(texture, u, v, mip_level)
                     color = [int(round(color[channel] * sample[channel] / 255))
                              for channel in range(3)]
-                gpu.GPU.draw_pixel([x, y], gpu.GPU.DEPTH_COMPONENT32F, [float(depth)])
+                    if len(sample) > 3:
+                        fragment_opacity *= sample[3] / 255
+                fragment_opacity = max(0.0, min(1.0, fragment_opacity))
+                if fragment_opacity == 0:
+                    continue
+                if fragment_opacity < 1.0:
+                    destination = gpu.GPU.read_pixel([x, y], gpu.GPU.RGB8)
+                    color = [int(round(color[channel] * fragment_opacity +
+                                       destination[channel] * (1 - fragment_opacity)))
+                             for channel in range(3)]
+                else:
+                    gpu.GPU.draw_pixel([x, y], gpu.GPU.DEPTH_COMPONENT32F, [float(depth)])
                 GL._draw_pixel(x, y, color)
 
     @staticmethod
@@ -218,7 +230,7 @@ class GL:
         dx, dy = x - x0, y - y0
         value = ((1 - dx) * (1 - dy) * level[y0, x0] + dx * (1 - dy) * level[y0, x1] +
                  (1 - dx) * dy * level[y1, x0] + dx * dy * level[y1, x1])
-        return value[:3]
+        return value
 
     @staticmethod
     def _load_texture(current_texture):
@@ -243,11 +255,11 @@ class GL:
         return projected
 
     @staticmethod
-    def _triangle_from_vertices(vertices, colors, texcoords=None, texture=None):
+    def _triangle_from_vertices(vertices, colors, texcoords=None, texture=None, opacity=1.0):
         projected = GL._project_triangle(vertices)
         if projected is None:
             return
-        GL._draw_triangle(projected, colors, texcoords, texture)
+        GL._draw_triangle(projected, colors, texcoords, texture, opacity)
 
     @staticmethod
     def polypoint2D(point, colors):
@@ -358,13 +370,14 @@ class GL:
 
         # O print abaixo é só para vocês verificarem o funcionamento, DEVE SER REMOVIDO.
         color = GL._color(colors)
+        opacity = 1.0 - max(0.0, min(1.0, colors.get("transparency", 0.0)))
         for index in range(0, len(point) - 8, 9):
             vertices = [point[index:index + 3],
                         point[index + 3:index + 6],
                         point[index + 6:index + 9]]
             projected = GL._project_triangle(vertices)
             if projected is not None:
-                GL._draw_triangle(projected, [color, color, color])
+                GL._draw_triangle(projected, [color, color, color], opacity=opacity)
 
     @staticmethod
     def viewpoint(position, orientation, fieldOfView):
@@ -521,6 +534,7 @@ class GL:
         color_faces = groups(colorIndex) if colorIndex else []
         texcoord_faces = groups(texCoordIndex) if texCoordIndex else []
         appearance_color = GL._color(colors)
+        appearance_opacity = 1.0 - max(0.0, min(1.0, colors.get("transparency", 0.0)))
         texture = GL._load_texture(current_texture)
 
         for face_number, face in enumerate(faces):
@@ -551,7 +565,7 @@ class GL:
                         triangle_texcoords = [texCoord[item * 2:item * 2 + 2]
                                               for item in tex_triangle_indices]
                 GL._triangle_from_vertices(vertices, triangle_colors,
-                                            triangle_texcoords, texture)
+                                            triangle_texcoords, texture, appearance_opacity)
 
     @staticmethod
     def box(size, colors):
